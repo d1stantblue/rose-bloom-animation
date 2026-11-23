@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Pipe Cleaner Rose Bouquet - Blooming</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: #050507;
+      overscroll-behavior: none;
+    }
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      font-family: monospace;
+      cursor: pointer;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    canvas { display: block; }
+    .hint {
+      position: fixed;
+      bottom: max(16px, env(safe-area-inset-bottom));
+      color: rgba(255, 255, 255, 0.35);
+      font-size: 12px;
+      pointer-events: none;
+      transition: opacity 1s;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="asciiCanvas"></canvas>
+  <div class="hint" id="hint"></div>
+
+  <script>
+    const canvas = document.getElementById("asciiCanvas");
+    const ctx = canvas.getContext("2d");
+    // Scene is drawn small (a few pixels per ASCII cell), never at full resolution.
+    const buffer = document.createElement("canvas");
+    const bctx = buffer.getContext("2d");
+    // Tiny grid canvas: one pixel per ASCII cell. This is the only thing we read back.
+    const grid = document.createElement("canvas");
+    const gctx = grid.getContext("2d", { willReadFrequently: true });
+
+    const hint = document.getElementById("hint");
+    const isTouch = window.matchMedia("(pointer: coarse)").matches;
+    hint.textContent = isTouch
+      ? "[ tap to replay · double-tap to toggle ASCII / smooth ]"
+      : "[ click to replay bloom · space or double-click to toggle ASCII / smooth ]";
+    setTimeout(() => { hint.style.opacity = 0; }, 6000);
+
+    const ASCII_CHARS = " .,:;-=+*#%@";
+    let CELL = 5, SS = 3, RS = 0.6, FPS = 60;
+    let width = 0, height = 0, cols = 0, rows = 0, sizeBoost = 1;
+    let startTime = performance.now();
+    let asciiMode = true;
+
+    function setup() {
+      width = Math.floor(Math.min(window.innerWidth, 800));
+      height = Math.floor(Math.min(window.innerHeight, 900));
+      const mobile = isTouch || window.innerWidth < 700;
+      CELL = mobile ? 6 : 5;
+      SS = mobile ? 2 : 3;           // scene pixels per ASCII cell
+      RS = SS / CELL;                // scene resolution scale
+      FPS = mobile ? 30 : 60;
+
+      canvas.width = width;
+      canvas.height = height;
+      buffer.width = Math.max(1, Math.round(width * RS));
+      buffer.height = Math.max(1, Math.round(height * RS));
+      cols = Math.ceil(width / CELL);
+      rows = Math.ceil(height / CELL);
+      grid.width = cols;
+      grid.height = rows;
+    }
+
+    let resizeTimer = null;
+    function onResize() {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(setup, 120);
+    }
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    setup();
+
+    // Tap: replay. Double tap / double click: toggle ASCII. Space also toggles.
+    let lastTap = 0, tapTimer = null;
+    window.addEventListener("pointerup", () => {
+      const t = performance.now();
+      if (t - lastTap < 300) {
+        clearTimeout(tapTimer);
+        asciiMode = !asciiMode;
+        lastTap = 0;
+      } else {
+        lastTap = t;
+        tapTimer = setTimeout(() => { startTime = performance.now(); }, 300);
+      }
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Space") { asciiMode = !asciiMode; e.preventDefault(); }
+    });
+
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+    const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+    const easeOutBack = (t) => { const c = 1.4; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
+
+    // body = [centre-side, mid, outer edge]; rim = fuzzy edge colour
+    const PAL = {
+      pink:    { body: ["#6e1a38", "#a8386a", "#e07aa0"], rim: "#f2b8cc", core: "#3d0a1e" },
+      red:     { body: ["#3f0610", "#8a0f22", "#c92d44"], rim: "#e0707e", core: "#240308" },
+      crimson: { body: ["#2a040a", "#5e0a18", "#992036"], rim: "#b84a5c", core: "#150205" },
+      hotpink: { body: ["#5e1038", "#a22a6a", "#d86a9e"], rim: "#eeaccd", core: "#34061f" },
+      blush:   { body: ["#9a5068", "#c97c98", "#eab0c4"], rim: "#f6d6e0", core: "#6a2a42" }
+    };
+
+    // Dense dome of roses
+    const bouquet = [
+      { x: 0.50, y: 0.15, size: 0.60, rot: 0.1, tilt: 0.85, delay: 0.2, pal: "red" },
+      { x: 0.37, y: 0.20, size: 0.62, rot: 0.5, tilt: 0.82, delay: 0.3, pal: "blush" },
+      { x: 0.63, y: 0.20, size: 0.62, rot: 0.2, tilt: 0.82, delay: 0.4, pal: "hotpink" },
+      { x: 0.26, y: 0.27, size: 0.64, rot: 0.9, tilt: 0.85, delay: 0.5, pal: "red" },
+      { x: 0.50, y: 0.26, size: 0.78, rot: 0.3, tilt: 0.92, delay: 0.6, pal: "pink" },
+      { x: 0.74, y: 0.27, size: 0.64, rot: 0.6, tilt: 0.85, delay: 0.7, pal: "crimson" },
+      { x: 0.37, y: 0.34, size: 0.78, rot: 0.0, tilt: 0.94, delay: 0.8, pal: "hotpink" },
+      { x: 0.63, y: 0.34, size: 0.78, rot: 0.7, tilt: 0.92, delay: 0.9, pal: "red" },
+      { x: 0.19, y: 0.38, size: 0.60, rot: 0.4, tilt: 0.85, delay: 1.0, pal: "blush" },
+      { x: 0.50, y: 0.42, size: 0.84, rot: 0.2, tilt: 0.96, delay: 1.1, pal: "red" },
+      { x: 0.81, y: 0.38, size: 0.60, rot: 0.8, tilt: 0.85, delay: 1.2, pal: "hotpink" },
+      { x: 0.28, y: 0.45, size: 0.76, rot: 0.5, tilt: 0.92, delay: 1.3, pal: "pink" },
+      { x: 0.72, y: 0.45, size: 0.76, rot: 0.1, tilt: 0.92, delay: 1.4, pal: "crimson" },
+      { x: 0.40, y: 0.53, size: 0.80, rot: 0.6, tilt: 0.94, delay: 1.5, pal: "red" },
+      { x: 0.60, y: 0.53, size: 0.80, rot: 0.3, tilt: 0.94, delay: 1.6, pal: "hotpink" },
+      { x: 0.21, y: 0.53, size: 0.58, rot: 0.9, tilt: 0.85, delay: 1.7, pal: "crimson" },
+      { x: 0.79, y: 0.53, size: 0.58, rot: 0.2, tilt: 0.85, delay: 1.8, pal: "blush" },
+      { x: 0.50, y: 0.62, size: 0.68, rot: 0.4, tilt: 0.92, delay: 1.9, pal: "pink" },
+      { x: 0.33, y: 0.61, size: 0.64, rot: 0.7, tilt: 0.88, delay: 2.0, pal: "hotpink" },
+      { x: 0.67, y: 0.61, size: 0.64, rot: 0.0, tilt: 0.88, delay: 2.1, pal: "red" }
+    ];
+    // Back-to-front draw order never changes, so sort once.
+    const drawOrder = bouquet.map((_, i) => i).sort((a, b) => bouquet[b].y - bouquet[a].y);
+
+    function quadPt(t, p0, p1, p2) {
+      const inv = 1 - t;
+      return inv * inv * p0 + 2 * inv * t * p1 + t * t * p2;
+    }
+
+    function drawStem(tx, ty, bx, by, sway, prog, scaleK) {
+      if (prog <= 0) return { tipX: bx, tipY: by };
+      const fcx = (tx + bx) / 2 + sway * 16, fcy = (ty + by) / 2;
+      const tipX = quadPt(prog, bx, fcx, tx), tipY = quadPt(prog, by, fcy, ty);
+      const ccx = (tipX + bx) / 2 + sway * 16 * prog, ccy = (tipY + by) / 2;
+
+      bctx.lineCap = "round";
+      bctx.beginPath();
+      bctx.moveTo(bx, by);
+      bctx.quadraticCurveTo(ccx, ccy, tipX, tipY);
+      bctx.strokeStyle = "#1f6a2c";
+      bctx.lineWidth = 7 * scaleK;
+      bctx.stroke();
+      bctx.strokeStyle = "#7fd47f";
+      bctx.lineWidth = 2.5 * scaleK;
+      bctx.stroke();
+
+      const leafG = easeOut(clamp01((prog - 0.45) / 0.55));
+      if (leafG > 0) {
+        const lx = quadPt(0.4, bx, fcx, tx), ly = quadPt(0.4, by, fcy, ty);
+        const dir = tx < bx ? -1 : 1;
+        bctx.save();
+        bctx.translate(lx, ly);
+        bctx.rotate(dir * (0.25 + 0.4 * leafG) + sway * 0.1);
+        bctx.scale(leafG * scaleK, leafG * scaleK);
+        bctx.beginPath();
+        bctx.moveTo(0, 0);
+        bctx.quadraticCurveTo(dir * 40, -24, dir * 84, 6);
+        bctx.quadraticCurveTo(dir * 40, 20, 0, 0);
+        bctx.fillStyle = leafGrad(dir);
+        bctx.fill();
+        bctx.strokeStyle = "#a6f0a0";
+        bctx.lineWidth = 2;
+        bctx.stroke();
+        bctx.restore();
+      }
+      return { tipX, tipY };
+    }
+
+    // Leaf gradients are identical every frame, so build them once per direction.
+    const leafGrads = {};
+    function leafGrad(dir) {
+      if (!leafGrads[dir]) {
+        const lg = bctx.createLinearGradient(0, 0, dir * 84, 0);
+        lg.addColorStop(0, "#1b4d22");
+        lg.addColorStop(0.6, "#35a042");
+        lg.addColorStop(1, "#8ce089");
+        leafGrads[dir] = lg;
+      }
+      return leafGrads[dir];
+    }
+
+    // ---------- Petal drawing (rendered once into sprites) ----------
+
+    // Rounded, cupped rose petal pointing "up" from the origin
+    function roundPetalPath(c, l, w) {
+      c.beginPath();
+      c.moveTo(-w * 0.35, 0);
+      c.bezierCurveTo(-w * 1.5, -l * 0.15, -w * 1.5, -l * 1.0, 0, -l);
+      c.bezierCurveTo(w * 1.5, -l * 1.0, w * 1.5, -l * 0.15, w * 0.35, 0);
+      c.closePath();
+    }
+
+    function drawRosePetal(c, l, w, pal) {
+      const [c1, c2, c3] = pal.body;
+      const g = c.createLinearGradient(0, 0, 0, -l);
+      g.addColorStop(0, c1);
+      g.addColorStop(0.55, c2);
+      g.addColorStop(1, c3);
+      roundPetalPath(c, l, w);
+      c.fillStyle = g;
+      c.fill();
+
+      c.save();
+      roundPetalPath(c, l, w);
+      c.clip();
+      // curved chenille ridges following the cup of the petal
+      let flip = false;
+      for (let k = 0.08; k < 1.05; k += 0.07) {
+        const y = -l * k;
+        const bow = 4 + 5 * k;
+        c.beginPath();
+        c.moveTo(-w * 1.6, y + bow);
+        c.quadraticCurveTo(0, y - bow, w * 1.6, y + bow);
+        c.strokeStyle = flip ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.18)";
+        c.lineWidth = 2.4;
+        c.stroke();
+        flip = !flip;
+      }
+      const sh = c.createLinearGradient(0, 0, 0, -l * 0.5);
+      sh.addColorStop(0, "rgba(0,0,0,0.4)");
+      sh.addColorStop(1, "rgba(0,0,0,0)");
+      c.fillStyle = sh;
+      c.fillRect(-w * 1.6, -l * 0.5, w * 3.2, l * 0.5);
+      c.restore();
+
+      roundPetalPath(c, l, w);
+      c.lineJoin = "round";
+      c.strokeStyle = pal.rim;
+      c.lineWidth = 5;
+      c.stroke();
+      roundPetalPath(c, l, w);
+      c.setLineDash([2, 3]);
+      c.strokeStyle = "rgba(255,255,255,0.35)";
+      c.lineWidth = 2;
+      c.stroke();
+      c.setLineDash([]);
+    }
+
+    // Layers of petals, outer to inner. Outer layers open first.
+    const LAYERS = [
+      { n: 6, dist: 22, len: 52, wid: 26, off: 0.0 },
+      { n: 5, dist: 15, len: 42, wid: 23, off: 0.5 },
+      { n: 4, dist: 9,  len: 32, wid: 19, off: 0.2 },
+      { n: 3, dist: 4,  len: 22, wid: 15, off: 0.9 }
+    ];
+
+    // One pre-rendered sprite per (palette, layer): drawn at full size, then
+    // scaled at runtime while the petal opens. Avoids re-running clip/gradient/ridges.
+    const petalSprites = {};
+    function getPetalSprite(palName, li) {
+      const key = palName + li;
+      let s = petalSprites[key];
+      if (s) return s;
+      const L = LAYERS[li];
+      const pad = 6;
+      const halfW = Math.ceil(L.wid * 1.25) + pad;
+      const cv = document.createElement("canvas");
+      cv.width = halfW * 2;
+      cv.height = Math.ceil(L.len) + pad * 2;
+      const c = cv.getContext("2d");
+      c.translate(halfW, L.len + pad);
+      drawRosePetal(c, L.len, L.wid, PAL[palName]);
+      s = petalSprites[key] = { cv, ax: halfW, ay: L.len + pad };
+      return s;
+    }
+
+    function blitPetal(c, palName, li, lk, wk) {
+      const s = getPetalSprite(palName, li);
+      c.scale(wk, lk);
+      c.drawImage(s.cv, -s.ax, -s.ay);
+    }
+
+    // Coiled pipe-cleaner spiral at the heart of the rose
+    function drawSpiral(c, pal, prog) {
+      if (prog <= 0) return;
+      const turns = 3.2 * prog;
+      const maxR = 16;
+      const end = turns * Math.PI * 2;
+      const trace = () => {
+        c.beginPath();
+        for (let t = 0; t <= end; t += 0.25) {
+          const r = 1.5 + (t / (3.2 * Math.PI * 2)) * maxR;
+          const px = Math.cos(t) * r, py = Math.sin(t) * r * 0.9;
+          if (t === 0) c.moveTo(px, py); else c.lineTo(px, py);
+        }
+      };
+      c.lineCap = "round";
+      c.lineJoin = "round";
+      trace();
+      c.strokeStyle = pal.core;
+      c.lineWidth = 7;
+      c.stroke();
+      c.strokeStyle = pal.body[1];
+      c.lineWidth = 4;
+      c.stroke();
+      c.setLineDash([2, 3]);
+      c.strokeStyle = pal.rim;
+      c.lineWidth = 2;
+      c.stroke();
+      c.setLineDash([]);
+    }
+
+    // The whole rose head at a given bloom progress, built from petal sprites.
+    function drawRoseHead(c, palName, openT) {
+      const P = PAL[palName];
+      LAYERS.forEach((L, li) => {
+        const pe = clamp01((openT - li * 0.14) / 0.6);
+        const e = clamp01(easeOutBack(pe));
+        const twist = (1 - pe) * 0.7 * (li % 2 ? -1 : 1);
+        for (let i = 0; i < L.n; i++) {
+          const a = L.off + (i * 2 * Math.PI) / L.n + twist;
+          c.save();
+          c.rotate(a);
+          c.translate(0, -L.dist * e);
+          // tight cup when closed, splayed when open
+          c.rotate((1 - e) * (i % 2 ? 0.25 : -0.25));
+          blitPetal(c, palName, li, 0.45 + 0.55 * e, 0.5 + 0.5 * e);
+          c.restore();
+        }
+      });
+      drawSpiral(c, P, easeOut(clamp01((openT - 0.3) / 0.6)));
+    }
+
+    // Once a rose has fully bloomed it never changes shape, only sways, so the
+    // finished head is cached as one sprite per palette and just blitted.
+    const HEAD_R = 86;
+    const headSprites = {};
+    function getHeadSprite(palName) {
+      let cv = headSprites[palName];
+      if (cv) return cv;
+      cv = document.createElement("canvas");
+      cv.width = cv.height = HEAD_R * 2;
+      const c = cv.getContext("2d");
+      c.translate(HEAD_R, HEAD_R);
+      drawRoseHead(c, palName, 1);
+      headSprites[palName] = cv;
+      return cv;
+    }
+
+    function drawRose(x, y, size, rot, tilt, palName, openT, budG, sway) {
+      if (budG <= 0) return;
+      bctx.save();
+      bctx.translate(x, y);
+      bctx.rotate(rot + sway * 0.06);
+      bctx.scale(tilt, tilt * 0.9 + 0.1);
+      bctx.scale(size * budG, size * budG);
+
+      if (openT >= 1 && budG >= 1) {
+        bctx.drawImage(getHeadSprite(palName), -HEAD_R, -HEAD_R);
+      } else {
+        drawRoseHead(bctx, palName, openT);
+      }
+      bctx.restore();
+    }
+
+    // ---------- ASCII conversion ----------
+
+    // Colours are quantised to 4 bits per channel and the CSS strings cached,
+    // so we don't build thousands of template strings every frame.
+    const colorCache = new Array(4096);
+    function colorFor(r, g, b) {
+      const key = ((Math.min(255, r * 1.2) >> 4) << 8) | ((Math.min(255, g * 1.2) >> 4) << 4) | (Math.min(255, b * 1.2) >> 4);
+      let s = colorCache[key];
+      if (!s) {
+        s = colorCache[key] = `rgb(${((key >> 8) & 15) * 17},${((key >> 4) & 15) * 17},${(key & 15) * 17})`;
+      }
+      return s;
+    }
+
+    function render(now) {
+      const elapsed = (now - startTime) / 1000;
+      const swayTime = now * 0.0014;
+      // Lay the bouquet out in a design box. On narrow (portrait) screens the box
+      // is stretched 1.3x wider than the screen so the roses spread across the
+      // full width instead of piling up in a narrow column; roses are sized from
+      // the same box so spacing stays proportional to rose size.
+      const xSpread = width < 600 ? 1.3 : 1;
+      const layoutW = width * xSpread, layoutH = height;
+      const scaleK = Math.min(layoutW / 800, layoutH / 900);
+      const posX = (f) => width * 0.5 + (f.x - 0.5) * layoutW;
+      const posY = (f) => f.y * layoutH;
+
+      bctx.setTransform(RS, 0, 0, RS, 0, 0);
+      bctx.fillStyle = "#000000";
+      bctx.fillRect(0, 0, width, height);
+
+      const bx = width * 0.5, by = height * 0.84;
+      const tips = new Array(bouquet.length);
+      const states = new Array(bouquet.length);
+      for (let idx = 0; idx < bouquet.length; idx++) {
+        const f = bouquet[idx];
+        const lt = Math.max(0, elapsed - f.delay);
+        const stemP = easeInOut(clamp01(lt / 1.2));
+        const budG = easeOut(clamp01((lt - 0.8) / 0.5));
+        const openT = clamp01((lt - 1.2) / 1.8);
+        const sway = Math.sin(swayTime + idx * 0.5) * stemP;
+        states[idx] = { budG, openT, sway };
+        tips[idx] = drawStem(posX(f), posY(f), bx, by, sway, stemP, scaleK);
+      }
+
+      for (const idx of drawOrder) {
+        const f = bouquet[idx], s = states[idx], t = tips[idx];
+        drawRose(t.tipX, t.tipY, f.size * scaleK * 1.25, f.rot, f.tilt, f.pal, s.openT, s.budG, s.sway);
+      }
+
+      if (!asciiMode) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(buffer, 0, 0, width, height);
+        return;
+      }
+
+      // Shrink the scene to one pixel per cell (browser averages for us) and
+      // read back only that tiny image.
+      gctx.imageSmoothingEnabled = true;
+      gctx.imageSmoothingQuality = "high";
+      gctx.clearRect(0, 0, cols, rows);
+      gctx.drawImage(buffer, 0, 0, width / CELL, height / CELL);
+      const data = gctx.getImageData(0, 0, cols, rows).data;
+
+      ctx.fillStyle = "#050507";
+      ctx.fillRect(0, 0, width, height);
+      ctx.font = `bold ${CELL + 3}px monospace`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      let lastColor = "";
+      const nChars = ASCII_CHARS.length;
+      for (let cy = 0; cy < rows; cy++) {
+        for (let cx = 0; cx < cols; cx++) {
+          const i = (cy * cols + cx) * 4;
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+          if (lum > 0.02) {
+            const ci = Math.min(nChars - 1, Math.floor(Math.pow(lum, 0.8) * nChars));
+            const col = colorFor(r, g, b);
+            if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
+            ctx.fillText(ASCII_CHARS[ci], cx * CELL + CELL / 2, cy * CELL + CELL / 2);
+          }
+        }
+      }
+    }
+
+    // Frame loop with a cap: 30 fps on phones, dropping to 20 once the bloom has
+    // settled and only the gentle sway remains.
+    let lastFrame = 0;
+    function frame(now) {
+      requestAnimationFrame(frame);
+      const settled = (now - startTime) / 1000 > 6;
+      const fps = FPS < 60 && settled ? 20 : FPS;
+      const interval = 1000 / fps;
+      if (now - lastFrame < interval - 1) return;
+      lastFrame = now;
+      render(now);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
